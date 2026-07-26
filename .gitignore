@@ -7,3 +7,6 @@ __pycache__/
 docs/*.md
 *-internal.md
 *-notes.md
+# Session state written by tooling. Holds working notes and prompts,
+# and this repository is public.
+.claude/
