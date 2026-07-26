@@ -6,12 +6,13 @@ one line per file, and `ctrl+o` still expands any of them.
 
 ![Before and after](docs/images/side-by-side.png)
 
-**Left: stock Claude Code.** One edit to a 65 line file. The diff is what you
-get, and the answer is somewhere below all of it.
-**Right: the same edit, patched.** One line, and the whole session still fits on
-screen.
+**Left: stock Claude Code.** One edit to a 101 line file. Fifty three lines of
+screen, almost all of it diff, and Claude's own answer is at the very bottom.
+**Right: the same edit, patched.** Thirteen lines, the whole session still
+readable: what you asked, what it read, `Added 21 lines, removed 10 lines`, and
+the answer.
 
-Both sides, as they actually ran:
+Same file, same instruction, same terminal. Both sides, as they actually ran:
 
 **Before.** Stock Claude Code.
 
