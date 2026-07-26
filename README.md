@@ -6,8 +6,24 @@ one line per file, and `ctrl+o` still expands any of them.
 
 ![Before and after](docs/images/side-by-side.png)
 
-**Left: stock Claude Code.** One edit, and you cannot see anything else.
-**Right: the same session patched.** Twenty file operations, all visible at once.
+**Left: stock Claude Code.** One edit to a 65 line file. The diff is what you
+get, and the answer is somewhere below all of it.
+**Right: the same edit, patched.** One line, and the whole session still fits on
+screen.
+
+Both sides, as they actually ran:
+
+**Before.** Stock Claude Code.
+
+![Before, on stock Claude Code](docs/images/before-stock.gif)
+
+**After.** The same file, the same instruction, patched.
+
+![After, patched](docs/images/after-quiet.gif)
+
+Real sessions on a real binary, captured frame by frame in the colours Claude
+Code itself sends. Nothing mocked up or edited. The only addition is the caption
+bar.
 
 It is not only the big edits. Here are four edits that changed **one line each**,
 on stock Claude Code:
