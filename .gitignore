@@ -1,0 +1,9 @@
+.DS_Store
+__pycache__/
+*.pyc
+
+# Internal working notes never belong in this public repo.
+# Launch plans, drafts and strategy live outside the repository.
+docs/*.md
+*-internal.md
+*-notes.md

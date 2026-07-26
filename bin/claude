@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+#
+# Launcher. Named `claude` so it is found before the real one on PATH.
+#
+# Why it exists: Claude Code updates itself, and an update replaces the binary,
+# which drops every patch. `/update` restarts by resolving `claude` on PATH and
+# spawning it directly, not through your shell, so a shell alias is stepped
+# over silently. A real file named `claude`, earlier on PATH, is not.
+#
+# It runs on every launch, so the common case must be free: compare a one-line
+# signature and exec. Python only starts when the binary actually changed,
+# which is once per Claude Code update.
+#
+# One shim serves all patches. Healing rebuilds from the shared registry, so it
+# does not matter which patch's copy of this file is the one on your PATH.
+#
+# It fails open, always. If anything here goes wrong Claude Code still starts.
+# A launcher that can stop you working is worse than no patch.
+
+set -u
+
+STATE="${CLAUDE_PATCH_HOME:-$HOME/.claude-patch}"
+TARGET_FILE="$STATE/target"
+STAMP_FILE="$STATE/fast.stamp"
+WATCH_FILE="$STATE/watch"
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# The signature covers the program AND every patch definition, so pulling a
+# newer version of a patch is noticed here rather than sitting unused on disk
+# until something else happens to trigger a rebuild. A handful of stat calls,
+# no interpreter started.
+signature() {
+  stat -f '%z %m %i' "$1" 2>/dev/null || stat -c '%s %Y %i' "$1" 2>/dev/null
+}
+
+combined_signature() {
+  printf '%s' "$(signature "$1")"
+  [ -r "$WATCH_FILE" ] || return 0
+  while IFS= read -r def || [ -n "$def" ]; do
+    [ -z "$def" ] && continue
+    printf ' %s' "$(stat -f '%z:%m' "$def" 2>/dev/null \
+      || stat -c '%s:%Y' "$def" 2>/dev/null || printf 'missing')"
+  done < "$WATCH_FILE"
+}
+
+TARGET=""
+[ -r "$TARGET_FILE" ] && TARGET="$(cat "$TARGET_FILE" 2>/dev/null || true)"
+
+# Fast path: the program and every patch are exactly what we last built from.
+if [ -n "$TARGET" ] && [ -x "$TARGET" ] && [ -r "$STAMP_FILE" ]; then
+  if [ "$(combined_signature "$TARGET")" = "$(cat "$STAMP_FILE" 2>/dev/null || true)" ]; then
+    exec "$TARGET" "$@"
+  fi
+fi
+
+# Slow path: first run, Claude Code updated and wiped the patches, or a patch
+# was updated and needs applying.
+for cli in "$SELF_DIR"/claude-*; do
+  if [ -x "$cli" ] && [ "$(basename "$cli")" != "claude" ]; then
+    "$cli" heal >&2 || true
+    break
+  fi
+done
+
+[ -r "$TARGET_FILE" ] && TARGET="$(cat "$TARGET_FILE" 2>/dev/null || true)"
+if [ -n "$TARGET" ] && [ -x "$TARGET" ]; then
+  exec "$TARGET" "$@"
+fi
+
+# Last resort: find the real binary ourselves, skipping this shim.
+while IFS=: read -r -d: dir || [ -n "$dir" ]; do
+  [ -z "$dir" ] && continue
+  [ "$(cd "$dir" 2>/dev/null && pwd)" = "$SELF_DIR" ] && continue
+  if [ -x "$dir/claude" ]; then
+    exec "$dir/claude" "$@"
+  fi
+done <<< "$PATH:"
+
+echo "claude-patch: could not find the Claude Code executable on PATH" >&2
+exit 127
