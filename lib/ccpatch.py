@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import inspect
 import json
 import mmap
 import os
@@ -63,10 +64,31 @@ class PatchError(RuntimeError):
 
 @dataclass
 class Edit:
+    """
+    One anchored change.
+
+    `build` is called for every match and returns the replacement text. It may
+    take either the match alone, or the match plus the whole file:
+
+        build(m)        the usual case
+        build(m, js)    when the replacement needs a name that lives elsewhere
+
+    The second form exists because minified names cannot be hardcoded. A
+    replacement sometimes has to call a function whose real name is only
+    discoverable from a different part of the file, and a regex cannot
+    practically span megabytes to capture both.
+    """
     name: str
     anchor: Pattern
     build: Callable
     count: int = 1
+
+    def replacement(self, m, js: str) -> str:
+        try:
+            wants_js = len(inspect.signature(self.build).parameters) >= 2
+        except (TypeError, ValueError):
+            wants_js = False
+        return self.build(m, js) if wants_js else self.build(m)
 
 
 @dataclass
@@ -94,7 +116,7 @@ class Patch:
                 )
             # Right to left, so earlier offsets stay valid.
             for m in reversed(hits):
-                old, new = m.group(0), e.build(m)
+                old, new = m.group(0), e.replacement(m, js)
                 for o, c in (("{", "}"), ("(", ")"), ("[", "]")):
                     if (old.count(o) - old.count(c)) != (new.count(o) - new.count(c)):
                         raise PatchError(
