@@ -19,7 +19,11 @@ Safety rules, enforced rather than remembered:
   - every edit must leave bracket balance unchanged, or nothing is written
   - the new file is built to one side and run once before it is allowed to
     replace the working one
-  - a failed build rolls back the record of what is installed
+  - registry writes and binary swaps are journaled, atomic and recoverable
+  - the saved original is accepted only after its complete digest matches
+  - patch operations are serialized by an owner-safe kernel lock
+  - the unpack/repack helper comes from a committed lockfile and installs with
+    package lifecycle scripts disabled
   - re-applying after a Claude Code update happens by itself, because it is the
     same code you already approved. Code that CHANGED on disk is never applied
     on its own: you are told, and it waits for you to install it
@@ -30,13 +34,16 @@ Safety rules, enforced rather than remembered:
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import importlib.util
 import inspect
 import json
 import mmap
 import os
+import secrets
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -47,9 +54,11 @@ from typing import Callable, Pattern
 HOME = Path.home()
 STATE = Path(os.environ.get("CLAUDE_PATCH_HOME", HOME / ".claude-patch"))
 REGISTRY = STATE / "registry.json"
+TRANSACTION = STATE / "transaction.json"
 BACKUPS = STATE / "backups"
 WORK = STATE / "work"
 TWEAKCC = STATE / "tweakcc"
+TWEAKCC_MANIFEST = Path(__file__).resolve().parent / "tweakcc-package"
 TWEAKCC_VERSION = "4.3.2"
 KEEP_BACKUPS = 2
 
@@ -131,16 +140,63 @@ class Patch:
 # Registry: which patches are enabled, and where their definitions live
 # ---------------------------------------------------------------------------
 
-def read_registry() -> dict:
+def _empty_registry() -> dict:
+    return {"stock": None, "patches": {}}
+
+
+def _validate_registry(reg: object) -> dict:
+    if not isinstance(reg, dict):
+        raise PatchError("registry root must be an object")
+    patches = reg.get("patches", {})
+    if not isinstance(patches, dict):
+        raise PatchError("registry patches must be an object")
+    for name, entry in patches.items():
+        if not isinstance(name, str) or not isinstance(entry, dict):
+            raise PatchError("registry patch entries must be named objects")
+        if not isinstance(entry.get("definition"), str):
+            raise PatchError(f"registry patch {name!r} has no definition path")
+        if "approved" in entry and not isinstance(entry["approved"], str):
+            raise PatchError(f"registry patch {name!r} has an invalid approval digest")
+    if reg.get("stock") is not None and not isinstance(reg.get("stock"), dict):
+        raise PatchError("registry stock entry must be an object or null")
+    if reg.get("built") is not None and not isinstance(reg.get("built"), dict):
+        raise PatchError("registry built entry must be an object or null")
+    reg.setdefault("stock", None)
+    reg.setdefault("patches", {})
+    return reg
+
+
+def _atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    fd = None
     try:
-        return json.loads(REGISTRY.read_text())
-    except Exception:
-        return {"stock": None, "patches": {}}
+        fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fd = None
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+        path.chmod(mode)
+    finally:
+        if fd is not None:
+            os.close(fd)
+        tmp.unlink(missing_ok=True)
+
+
+def read_registry() -> dict:
+    if not REGISTRY.exists():
+        return _empty_registry()
+    try:
+        return _validate_registry(json.loads(REGISTRY.read_text()))
+    except (OSError, json.JSONDecodeError) as e:
+        raise PatchError(f"cannot read registry {REGISTRY}: {e}") from e
 
 
 def write_registry(reg: dict) -> None:
-    STATE.mkdir(parents=True, exist_ok=True)
-    REGISTRY.write_text(json.dumps(reg, indent=2))
+    _validate_registry(reg)
+    _atomic_write_text(REGISTRY, json.dumps(reg, indent=2) + "\n")
 
 
 def _load_patch_from(entry: dict):
@@ -287,23 +343,62 @@ def tweakcc_bin() -> Path:
     return TWEAKCC / "node_modules" / ".bin" / "tweakcc"
 
 
+def _tweakcc_manifest_digest() -> str:
+    package = TWEAKCC_MANIFEST / "package.json"
+    lock = TWEAKCC_MANIFEST / "package-lock.json"
+    if not package.is_file() or not lock.is_file():
+        raise PatchError(f"locked tweakcc manifest is missing from {TWEAKCC_MANIFEST}")
+    h = hashlib.sha256()
+    h.update(package.read_bytes())
+    h.update(lock.read_bytes())
+    return h.hexdigest()
+
+
 def ensure_tweakcc(log=print) -> Path:
     """Install the unpack/repack helper locally, pinned to a known version."""
     exe = tweakcc_bin()
-    if exe.exists():
+    expected = _tweakcc_manifest_digest()
+    installed = TWEAKCC / ".manifest-sha256"
+    if exe.is_file() and installed.is_file() \
+            and installed.read_text().strip() == expected:
         return exe
     if not shutil.which("npm"):
         raise PatchError("npm is required to install tweakcc (needs Node.js)")
-    log(f"installing tweakcc@{TWEAKCC_VERSION} (one time)...")
-    TWEAKCC.mkdir(parents=True, exist_ok=True)
-    r = subprocess.run(
-        ["npm", "install", "--no-save", "--silent", "--prefix", str(TWEAKCC),
-         f"tweakcc@{TWEAKCC_VERSION}"],
-        capture_output=True, text=True,
-    )
-    if r.returncode != 0 or not exe.exists():
-        raise PatchError(f"tweakcc install failed: {r.stderr.strip()[:300]}")
-    return exe
+    log(f"installing locked tweakcc@{TWEAKCC_VERSION} tree (one time)...")
+    STATE.mkdir(parents=True, exist_ok=True)
+    nonce = f"{os.getpid()}-{time.time_ns()}"
+    staged = STATE / f"tweakcc-next-{nonce}"
+    previous = STATE / f"tweakcc-old-{nonce}"
+    moved_previous = False
+    try:
+        staged.mkdir(mode=0o700)
+        shutil.copy2(TWEAKCC_MANIFEST / "package.json", staged / "package.json")
+        shutil.copy2(TWEAKCC_MANIFEST / "package-lock.json", staged / "package-lock.json")
+        r = subprocess.run(
+            ["npm", "ci", "--ignore-scripts", "--omit=dev", "--silent"],
+            cwd=staged,
+            capture_output=True, text=True,
+        )
+        staged_exe = staged / "node_modules" / ".bin" / "tweakcc"
+        if r.returncode != 0 or not staged_exe.is_file():
+            raise PatchError(f"tweakcc install failed: {r.stderr.strip()[:300]}")
+        _atomic_write_text(staged / ".manifest-sha256", expected + "\n")
+        if TWEAKCC.exists():
+            os.replace(TWEAKCC, previous)
+            moved_previous = True
+        os.replace(staged, TWEAKCC)
+        if moved_previous:
+            shutil.rmtree(previous)
+        return tweakcc_bin()
+    except BaseException:
+        if moved_previous and previous.exists() and not TWEAKCC.exists():
+            os.replace(previous, TWEAKCC)
+        raise
+    finally:
+        if staged.exists():
+            shutil.rmtree(staged)
+        if previous.exists() and TWEAKCC.exists():
+            shutil.rmtree(previous)
 
 
 def _tweakcc(exe: Path, *args) -> None:
@@ -325,29 +420,84 @@ class Lock:
         self.path = STATE / "lock"
         self.stale_after = stale_after
         self.fd = None
+        self.owner = f"{os.getpid()}:{secrets.token_hex(16)}"
+
+    @staticmethod
+    def _owner_is_alive(value: str) -> bool:
+        try:
+            pid = int(value.split(":", 1)[0])
+            if pid <= 0:
+                return False
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except (OSError, TypeError, ValueError):
+            return False
 
     def __enter__(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        for _ in range(2):
-            try:
-                self.fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.write(self.fd, str(os.getpid()).encode())
-                return self
-            except FileExistsError:
-                try:
-                    age = time.time() - self.path.stat().st_mtime
-                except OSError:
-                    age = 0
-                if age > self.stale_after:
-                    self.path.unlink(missing_ok=True)
-                    continue
+        try:
+            self.fd = os.open(
+                self.path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+            created = True
+        except FileExistsError:
+            self.fd = os.open(self.path, os.O_RDWR)
+            created = False
+        try:
+            fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError) as e:
+            os.close(self.fd)
+            self.fd = None
+            raise PatchError("another patch run is in progress") from e
+        try:
+            os.lseek(self.fd, 0, os.SEEK_SET)
+            recorded = os.read(self.fd, 256).decode(errors="replace").strip()
+            age = time.time() - os.fstat(self.fd).st_mtime
+            has_pid = recorded.split(":", 1)[0].isdigit()
+            if self._owner_is_alive(recorded):
                 raise PatchError("another patch run is in progress")
-        raise PatchError("could not take the lock")
+            if not created and not recorded and age <= self.stale_after:
+                # A live pre-flock version may have created the file but not
+                # written its PID yet. A clean release writes "released".
+                raise PatchError("another patch run is in progress")
+            if recorded not in ("", "released") and not has_pid \
+                    and age <= self.stale_after:
+                raise PatchError("another patch run is in progress")
+            os.ftruncate(self.fd, 0)
+            os.lseek(self.fd, 0, os.SEEK_SET)
+            os.write(self.fd, self.owner.encode())
+            os.fsync(self.fd)
+            return self
+        except BaseException:
+            fcntl.flock(self.fd, fcntl.LOCK_UN)
+            os.close(self.fd)
+            self.fd = None
+            raise
 
     def __exit__(self, *exc):
-        if self.fd is not None:
+        if self.fd is None:
+            return False
+        try:
+            current = os.fstat(self.fd)
+            path_stat = self.path.stat()
+            os.lseek(self.fd, 0, os.SEEK_SET)
+            recorded = os.read(self.fd, 256).decode(errors="replace").strip()
+            if (current.st_dev, current.st_ino) == \
+                    (path_stat.st_dev, path_stat.st_ino) \
+                    and recorded == self.owner:
+                os.ftruncate(self.fd, 0)
+                os.lseek(self.fd, 0, os.SEEK_SET)
+                os.write(self.fd, b"released")
+                os.fsync(self.fd)
+        except OSError:
+            pass
+        finally:
+            fcntl.flock(self.fd, fcntl.LOCK_UN)
             os.close(self.fd)
-        self.path.unlink(missing_ok=True)
+            self.fd = None
         return False
 
 
@@ -438,6 +588,29 @@ def _carries_our_work(binary: Path, patches: list, reg: dict) -> bool:
         return False
 
 
+def _verified_stock(reg: dict) -> tuple[Path, str]:
+    stock = reg.get("stock") or {}
+    recorded = stock.get("path")
+    expected = stock.get("sha256")
+    if not isinstance(recorded, str) or not recorded:
+        raise PatchError("the stock backup path is not recorded")
+    path = Path(recorded)
+    try:
+        st = path.lstat()
+    except OSError as e:
+        raise PatchError(f"the stock backup is missing: {path}") from e
+    if path.is_symlink() or not stat.S_ISREG(st.st_mode):
+        raise PatchError(f"the stock backup is not a regular file: {path}")
+    if not isinstance(expected, str) or len(expected) not in (12, 64):
+        raise PatchError("the stock backup has no valid recorded digest")
+    actual = _sha256(path)
+    good = actual == expected if len(expected) == 64 else actual.startswith(expected)
+    if not good:
+        raise PatchError(
+            f"the stock backup digest does not match its registry record: {path}")
+    return path, actual
+
+
 def _ensure_stock(binary: Path, reg: dict, log, patches: list) -> Path:
     """The pristine binary for this version.
 
@@ -452,32 +625,95 @@ def _ensure_stock(binary: Path, reg: dict, log, patches: list) -> Path:
     if _binary_is_ours(binary, reg) or _carries_our_work(binary, patches, reg):
         # The binary on disk is our own build, so it is not stock. Use the
         # backup we recorded when we built it.
-        recorded = (reg.get("stock") or {}).get("path")
-        if recorded and Path(recorded).exists():
-            return Path(recorded)
-        raise PatchError(
-            "the stock backup is missing and the binary already carries "
-            "patches. Reinstall Claude Code, then patch again."
-        )
+        backup, digest = _verified_stock(reg)
+        reg["stock"]["sha256"] = digest
+        return backup
 
     # Not our build, so this IS stock: a fresh install, or what a Claude Code
     # update just wrote. Name the backup by content, not by version alone: a
     # release that reuses a version number but ships different bytes would
     # otherwise be rebuilt from a stale backup, silently undoing the update.
     version = _version_of(binary)
-    digest = _sha256(binary)[:12]
-    backup = BACKUPS / f"claude-{version}-{digest}.orig"
+    digest = _sha256(binary)
+    backup = BACKUPS / f"claude-{version}-{digest[:12]}.orig"
 
     if not backup.exists():
         BACKUPS.mkdir(parents=True, exist_ok=True)
         log(f"  saving stock binary ({version})")
         shutil.copy2(binary, backup)
+    backup_digest = _sha256(backup)
+    if backup_digest != digest:
+        raise PatchError(f"the stock backup does not match the source binary: {backup}")
     reg["stock"] = {"version": version, "sha256": digest, "path": str(backup)}
     _prune_backups()
     return backup
 
 
-def rebuild(log=print, skip_dirs=None, require_approved: bool = False) -> bool:
+def _drop_missing_patches(reg: dict, log) -> list[str]:
+    missing = []
+    for name, entry in sorted(list(reg.get("patches", {}).items())):
+        definition = Path(entry["definition"])
+        if definition.is_file():
+            continue
+        missing.append(name)
+        del reg["patches"][name]
+        log(f"  warning: removing {name}: definition missing: {definition}")
+    return missing
+
+
+def _write_runtime_state(reg: dict, binary: Path) -> None:
+    built = reg.get("built") or {}
+    _atomic_write_text(STATE / "target", str(binary) + "\n")
+    _atomic_write_text(STATE / "fast.stamp", str(built.get("signature", "")) + "\n")
+    _atomic_write_text(
+        STATE / "watch", "\n".join(str(d) for d in watched_definitions(reg)) + "\n")
+
+
+def _restore_hardlinks(binary: Path, links: list[Path]) -> None:
+    for link in links:
+        try:
+            if link.exists() or link.is_symlink():
+                link.unlink()
+            os.link(binary, link)
+        except OSError as e:
+            raise PatchError(f"could not restore hardlink {link}: {e}") from e
+
+
+def recover_transaction(log=lambda s: None) -> bool:
+    """Roll back a commit interrupted after the binary swap began."""
+    if not TRANSACTION.exists():
+        return False
+    try:
+        tx = json.loads(TRANSACTION.read_text())
+        before = _validate_registry(tx["registry_before"])
+        binary = Path(tx["binary"])
+        rollback = Path(tx["rollback"])
+        links = [Path(p) for p in tx.get("hardlinks", [])]
+    except (OSError, KeyError, TypeError, json.JSONDecodeError, PatchError) as e:
+        raise PatchError(f"cannot read interrupted transaction {TRANSACTION}: {e}") from e
+
+    expected_prefix = f".{binary.name}.claude-patch-"
+    if rollback.parent != binary.parent or not rollback.name.startswith(expected_prefix):
+        raise PatchError("interrupted transaction has an unsafe rollback path")
+    if not rollback.is_file() or rollback.is_symlink():
+        raise PatchError(f"interrupted transaction rollback is missing: {rollback}")
+    allowed_root = binary.parent.parent.resolve()
+    for link in links:
+        if not link.parent.resolve().is_relative_to(allowed_root):
+            raise PatchError(f"interrupted transaction has an unsafe hardlink path: {link}")
+
+    os.replace(rollback, binary)
+    binary.chmod(0o755)
+    _restore_hardlinks(binary, links)
+    write_registry(before)
+    _write_runtime_state(before, binary)
+    TRANSACTION.unlink()
+    log("  recovered an interrupted patch transaction")
+    return True
+
+
+def rebuild(log=print, skip_dirs=None, require_approved: bool = False,
+            registry: dict | None = None) -> bool:
     """Rebuild the binary as stock + every enabled patch. The only mutator.
 
     require_approved is set when this runs by itself, from the launcher. Then
@@ -489,7 +725,11 @@ def rebuild(log=print, skip_dirs=None, require_approved: bool = False) -> bool:
     binary = find_binary(skip_dirs)
 
     with Lock():
-        reg = read_registry()
+        recover_transaction(log)
+        before = read_registry()
+        reg = json.loads(json.dumps(registry if registry is not None else before))
+        _validate_registry(reg)
+        _drop_missing_patches(reg, log)
         if require_approved:
             changed = unapproved_patches(reg)
             if changed:
@@ -511,77 +751,99 @@ def rebuild(log=print, skip_dirs=None, require_approved: bool = False) -> bool:
         stock = _ensure_stock(binary, reg, log, patches)
 
         WORK.mkdir(parents=True, exist_ok=True)
-        staged = WORK / "claude.staged"
-        js_path = WORK / "cli.js"
+        nonce = f"{os.getpid()}-{time.time_ns()}"
+        staged = WORK / f"claude-{nonce}.staged"
+        js_path = WORK / f"cli-{nonce}.js"
+        install_staged = binary.parent / f".{binary.name}.claude-patch-{nonce}.staged"
+        rollback = binary.parent / f".{binary.name}.claude-patch-{nonce}.rollback"
+        journal_written = False
 
-        if not patches:
-            log("no patches enabled; restoring stock Claude Code")
-            shutil.copy2(stock, staged)
-        else:
-            exe = ensure_tweakcc(log)
-            shutil.copy2(stock, staged)
+        try:
+            if not patches:
+                log("no patches enabled; restoring stock Claude Code")
+                shutil.copy2(stock, staged)
+            else:
+                exe = ensure_tweakcc(log)
+                shutil.copy2(stock, staged)
+                staged.chmod(0o755)
+                log("unpacking...")
+                _tweakcc(exe, "unpack", str(js_path), str(staged))
+                js = js_path.read_text(encoding="utf-8")
+                for p in patches:
+                    log(f"  applying {p.name}")
+                    js = p.apply(js, log)
+                js_path.write_text(js, encoding="utf-8")
+                log("repacking...")
+                _tweakcc(exe, "repack", str(js_path), str(staged))
+
             staged.chmod(0o755)
-            log("unpacking...")
-            _tweakcc(exe, "unpack", str(js_path), str(staged))
-            js = js_path.read_text(encoding="utf-8")
-            for p in patches:
-                log(f"  applying {p.name}")
-                js = p.apply(js, log)
-            js_path.write_text(js, encoding="utf-8")
-            log("repacking...")
-            _tweakcc(exe, "repack", str(js_path), str(staged))
-            js_path.unlink(missing_ok=True)
+            log("verifying...")
+            r = subprocess.run([str(staged), "--version"], capture_output=True,
+                               text=True, timeout=120)
+            if r.returncode != 0 or "Claude Code" not in r.stdout:
+                raise PatchError(
+                    f"rebuilt binary failed to run: {(r.stderr or r.stdout)[:200]}")
 
-        staged.chmod(0o755)
-        log("verifying...")
-        r = subprocess.run([str(staged), "--version"], capture_output=True,
-                           text=True, timeout=120)
-        if r.returncode != 0 or "Claude Code" not in r.stdout:
-            raise PatchError(f"rebuilt binary failed to run: {(r.stderr or r.stdout)[:200]}")
+            shutil.copy2(staged, install_staged)
+            install_staged.chmod(0o755)
+            if _sha256(install_staged) != _sha256(staged):
+                raise PatchError("copying the staged binary beside the target changed it")
 
-        links = _hardlinks_of(binary)
-        os.replace(staged, binary)
-        binary.chmod(0o755)
-        for link in links:
+            links = _hardlinks_of(binary)
             try:
-                link.unlink()
-                os.link(binary, link)
-            except OSError as e:
-                log(f"  note: could not restore hardlink {link}: {e}")
+                os.link(binary, rollback)
+            except OSError:
+                shutil.copy2(binary, rollback)
+            tx = {
+                "binary": str(binary),
+                "rollback": str(rollback),
+                "hardlinks": [str(p) for p in links],
+                "registry_before": before,
+            }
+            _atomic_write_text(TRANSACTION, json.dumps(tx, indent=2) + "\n")
+            journal_written = True
 
-        reg["built"] = {
-            "identity": identity(binary),
-            "version": _version_of(binary),
-            "patches": {p.name: p.version for p in patches},
-            "markers": sorted(set(
-                [m for m in (reg.get("built") or {}).get("markers", []) if m]
-                + [p.marker for p in patches if p.marker])),
-            "signature": combined_signature(binary, reg),
-            "at": int(time.time()),
-        }
-        write_registry(reg)
-        (STATE / "target").write_text(str(binary))
-        (STATE / "fast.stamp").write_text(reg["built"]["signature"])
-        (STATE / "watch").write_text(
-            "\n".join(str(d) for d in watched_definitions(reg)))
-        log(f"claude code {reg['built']['version']}: "
-            + (", ".join(p.name for p in patches) if patches else "stock"))
-        return True
+            os.replace(install_staged, binary)
+            binary.chmod(0o755)
+            _restore_hardlinks(binary, links)
+
+            reg["built"] = {
+                "identity": identity(binary),
+                "version": _version_of(binary),
+                "patches": {p.name: p.version for p in patches},
+                "markers": sorted(set(
+                    [m for m in (reg.get("built") or {}).get("markers", []) if m]
+                    + [p.marker for p in patches if p.marker])),
+                "signature": combined_signature(binary, reg),
+                "at": int(time.time()),
+            }
+            write_registry(reg)
+            _write_runtime_state(reg, binary)
+            TRANSACTION.unlink()
+            journal_written = False
+            rollback.unlink(missing_ok=True)
+            log(f"claude code {reg['built']['version']}: "
+                + (", ".join(p.name for p in patches) if patches else "stock"))
+            return True
+        except BaseException:
+            if journal_written:
+                try:
+                    recover_transaction(log)
+                    journal_written = False
+                except BaseException as rollback_error:
+                    log(f"  warning: automatic rollback failed: {rollback_error}")
+            raise
+        finally:
+            staged.unlink(missing_ok=True)
+            js_path.unlink(missing_ok=True)
+            install_staged.unlink(missing_ok=True)
+            if not TRANSACTION.exists():
+                rollback.unlink(missing_ok=True)
 
 
-def _with_rollback(before: dict, log) -> bool:
-    """Rebuild, and put the registry back if it fails.
-
-    The registry is a claim about what the binary contains. A failed rebuild
-    leaves the binary untouched, so a registry still claiming the change would
-    be a lie: `status` would report ON for something absent, and every later
-    heal would retry the same doomed build.
-    """
-    try:
-        return rebuild(log)
-    except Exception:
-        write_registry(before)
-        raise
+def _with_rollback(before: dict, desired: dict, log) -> bool:
+    """Build the desired registry and publish it only with the binary."""
+    return rebuild(log=log, registry=desired)
 
 
 def enable(patch: Patch, definition: Path, log=print) -> bool:
@@ -594,8 +856,7 @@ def enable(patch: Patch, definition: Path, log=print) -> bool:
         "approved": definition_digest(definition),
         "at": int(time.time()),
     }
-    write_registry(reg)
-    return _with_rollback(before, log)
+    return _with_rollback(before, reg, log)
 
 
 def disable(patch: Patch, log=print) -> bool:
@@ -605,30 +866,31 @@ def disable(patch: Patch, log=print) -> bool:
         return False
     reg = json.loads(json.dumps(before))
     del reg["patches"][patch.name]
-    write_registry(reg)
-    return _with_rollback(before, log)
+    return _with_rollback(before, reg, log)
 
 
-def self_heal(log=lambda s: None) -> None:
+def self_heal(log=lambda s: None) -> bool:
     """Called by the launcher. Must never stop Claude Code starting."""
     deadline = time.time() + 45
     while True:
         try:
+            if TRANSACTION.exists():
+                with Lock():
+                    recover_transaction(log)
             if is_current():
-                return
+                return True
             if not read_registry().get("patches"):
-                return
-            rebuild(log=log, require_approved=True)
-            return
+                return True
+            return rebuild(log=log, require_approved=True)
         except PatchError as e:
             if "in progress" in str(e) and time.time() < deadline:
                 time.sleep(1.5)
                 continue
             log(f"claude-patch: leaving Claude Code as it is ({e})")
-            return
+            return False
         except Exception as e:  # noqa: BLE001 - failing open is the point
             log(f"claude-patch: leaving Claude Code as it is ({e})")
-            return
+            return False
 
 
 # ---------------------------------------------------------------------------
@@ -731,6 +993,9 @@ def main(patch: Patch, argv: list) -> int:
         return 0
 
     try:
+        if TRANSACTION.exists():
+            with Lock():
+                recover_transaction(print)
         if cmd == "status":
             reg = read_registry()
             on = patch.name in reg.get("patches", {})
@@ -772,8 +1037,7 @@ def main(patch: Patch, argv: list) -> int:
             return _cmd_update(patch)
 
         if cmd == "heal":
-            self_heal(log=print)
-            return 0
+            return 0 if self_heal(log=print) else 1
 
         if cmd == "verify":
             binary = find_binary()
@@ -819,9 +1083,31 @@ def main(patch: Patch, argv: list) -> int:
                 check("claude code found", False, str(e))
             check("tweakcc installed", tweakcc_bin().exists(),
                   "" if tweakcc_bin().exists() else "(installed on first patch)")
+            try:
+                manifest_ok = ((TWEAKCC / ".manifest-sha256").read_text().strip()
+                               == _tweakcc_manifest_digest())
+            except (OSError, PatchError):
+                manifest_ok = False
+            check("tweakcc dependency tree locked", manifest_ok,
+                  "" if manifest_ok else "(refreshed on next install)")
             reg = read_registry()
-            check("stock backup saved", bool(reg.get("stock")),
-                  reg.get("stock", {}).get("version", "") if reg.get("stock") else "")
+            stock = reg.get("stock") or {}
+            check("stock backup saved", bool(stock), stock.get("version", ""))
+            if stock:
+                path = Path(stock.get("path", ""))
+                try:
+                    st = path.lstat()
+                    regular = stat.S_ISREG(st.st_mode) and not path.is_symlink()
+                except OSError:
+                    regular = False
+                check("stock backup is a regular file", regular, str(path))
+                try:
+                    _, actual = _verified_stock(reg)
+                    full_digest = len(stock.get("sha256", "")) == 64 \
+                        and stock.get("sha256") == actual
+                except PatchError:
+                    full_digest = False
+                check("stock backup full digest", full_digest)
             return 0 if ok else 1
 
         print(usage)

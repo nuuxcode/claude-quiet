@@ -43,12 +43,14 @@ usage: ./install.sh [--dry-run] [--no-path] [--yes]
   --yes       do not ask
 EOF
       exit 0 ;;
+    *)
+      echo "unknown option: $arg" >&2
+      echo "run ./install.sh --help for usage" >&2
+      exit 2 ;;
   esac
 done
 
 say() { printf '%s\n' "$*"; }
-
-chmod +x "$BIN"/claude "$CLI" 2>/dev/null || true
 
 say "$NAME"
 say ""
@@ -65,17 +67,23 @@ if [ "$DRY" -eq 1 ]; then
   exit 0
 fi
 
-if [ "$YES" -eq 0 ] && [ -t 0 ]; then
+if [ "$YES" -eq 0 ]; then
+  if [ ! -t 0 ]; then
+    say "non-interactive installation requires --yes" >&2
+    exit 1
+  fi
   printf 'continue? [y/N] '
   read -r reply
   case "$reply" in [yY]*) ;; *) say "cancelled"; exit 1 ;; esac
 fi
 
+chmod +x "$BIN"/claude "$CLI" 2>/dev/null || true
+
 if [ "$NO_PATH" -eq 0 ]; then
   LINE="export PATH=\"$BIN:\$PATH\"  # $NAME"
   for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
     [ -f "$rc" ] || continue
-    if grep -q "# claude-" "$rc" 2>/dev/null; then
+    if grep -Eq '^export PATH=".*:\$PATH"  # claude-[A-Za-z0-9._-]+$' "$rc" 2>/dev/null; then
       say "a launcher is already on your PATH via $rc, leaving it alone"
     else
       printf '\n%s\n' "$LINE" >> "$rc"

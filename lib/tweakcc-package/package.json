@@ -1,0 +1,8 @@
+{
+  "name": "claude-patch-kit-tweakcc-runtime",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {
+    "tweakcc": "4.3.2"
+  }
+}
