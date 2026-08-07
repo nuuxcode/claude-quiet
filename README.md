@@ -38,6 +38,36 @@ wrapper script, an IDE integration. There is nothing new to remember.
 
 ---
 
+## New in 2.1.0: the shell command and its output, also one line
+
+Edits were never the only thing filling the screen. A long shell command is
+drawn over four wrapped lines in a split pane, and three lines of its output
+follow it. Both are one line now.
+
+```
+Bash(cd /private/tmp/claude-501/-Users-hamzadebbarh…)
+  … +24 lines (ctrl+o to expand)
+```
+
+The command header was already being shortened, to two lines and 160
+characters, which is one line on a wide terminal and four in a narrow one. It
+now uses the width of the terminal you are actually looking at.
+
+The output is folded at the first line instead of the third. **Output that
+already fits on one line is still printed in full**, so short answers are not
+replaced by a notice the same size as the answer.
+
+```bash
+export CLAUDE_QUIET_LINES=3    # show three lines before folding, which is
+                               # what Claude Code does on its own
+export CLAUDE_QUIET_BASH=off   # leave the shell command header alone
+```
+
+Everything is still one `ctrl+o` away. Nothing is deleted and nothing is
+hidden from Claude, only from you, and only until you ask.
+
+---
+
 ## How this differs from `/focus`
 
 Claude Code has a focus mode. It is a different thing.
