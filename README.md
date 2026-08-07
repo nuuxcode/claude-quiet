@@ -38,16 +38,28 @@ wrapper script, an IDE integration. There is nothing new to remember.
 
 ---
 
-## New in 2.1.0: the shell command and its output, also one line
+## New in 2.2.0: the shell command and its output, also one line
 
-Edits were never the only thing filling the screen. A long shell command is
-drawn over four wrapped lines in a split pane, and three lines of its output
-follow it. Both are one line now.
+Edits were never the only thing filling the screen. A shell command took three
+lines: the command wrapped over four in a split pane, three lines of its
+output, and a notice about the working directory. It takes two.
 
 ```
-Bash(cd /private/tmp/claude-501/-Users-hamzadebbarh…)
-  … +24 lines (ctrl+o to expand)
+⏺ Bash(cd /tmp && echo one && echo two && echo three && echo four)
+  ⎿  +4 lines (ctrl+o)
 ```
+
+That is a real session, at the two things worth keeping: what ran, and how
+much it said.
+
+**The `Shell cwd was reset to ...` notice no longer gets a line.** It is the
+same sentence every time and it names a directory you are already in. It is
+still taken out of the command's output rather than left in the middle of it,
+and Claude is still told, because that part is not the transcript.
+
+**The fold line is three words.** `+4 lines (ctrl+o)` rather than
+`… +4 lines (ctrl+o to expand)`. The key comes from your keybinding, so if you
+have rebound the transcript key you see your own.
 
 The command header was already being shortened, to two lines and 160
 characters, which is one line on a wide terminal and four in a narrow one. It

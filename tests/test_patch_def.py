@@ -43,6 +43,16 @@ FIXTURE = "\n".join([
     'function isFolded(e){return!1}var LINES=3,GUT=10;',
     'function fold(e,t,r=!1){let n=e.trimEnd();if(!n)return"";'
     'let o=Math.max(t-GUT,10),i=LINES*o*4,s=n.length>i,a=s?n.slice(0,i):n;}',
+    # the cwd notice, split out of stderr to be drawn on its own row
+    'function splitCwd(e){let t=e.match(RE);'
+    'if(!t)return{cleanedStderr:e,cwdResetWarning:null};'
+    'let r=t[1]??null;'
+    'return{cleanedStderr:e.replace(RE,"").trim(),cwdResetWarning:r}}',
+    # the fold line's two halves: the count and the key hint
+    'function count(e,t="line"){if(e<=0)return"";'
+    'return`\\u2026 +${e} ${plural(e,t)}`}',
+    'function hint(){let e=chord("app:toggleTranscript","Global","ctrl+o");'
+    'return c.dim(`(${e} to expand)`)}',
 ])
 
 
@@ -149,6 +159,35 @@ class FoldTests(unittest.TestCase):
         """Without the floor, a cap of zero also zeroes the pre-wrap slice, the
         fast path is skipped, and even a two word answer folds."""
         self.assertIn("i=Math.max(LINES,1)*o*4,", self.out)
+
+
+class BlockShapeTests(unittest.TestCase):
+    """What is left under a shell command once the noise is gone."""
+
+    def setUp(self):
+        self.out = applied()
+
+    def test_the_cwd_notice_never_gets_a_row(self):
+        self.assertIn("cwdResetWarning:null}}", self.out)
+        self.assertNotIn("cwdResetWarning:r}", self.out)
+
+    def test_it_is_still_stripped_out_of_the_output(self):
+        """Suppressing the row must not leave the sentence in the middle of
+        the command's own output."""
+        self.assertIn('cleanedStderr:e.replace(RE,"").trim()', self.out)
+
+    def test_the_fold_line_loses_the_ellipsis(self):
+        self.assertIn("return`+${e} ${plural(e,t)}`}", self.out)
+        self.assertNotIn("\\u2026 +${e}", self.out)
+
+    def test_the_hint_is_the_key_and_nothing_else(self):
+        self.assertIn("return c.dim(`(${e})`)}", self.out)
+        self.assertNotIn("to expand", self.out)
+
+    def test_the_key_is_read_rather_than_written(self):
+        """Someone who rebound the transcript key sees their own key."""
+        self.assertIn('chord("app:toggleTranscript","Global","ctrl+o")',
+                      self.out)
 
 
 class CapValueTests(unittest.TestCase):

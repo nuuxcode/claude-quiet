@@ -8,9 +8,9 @@ went with it.
 
 Every one of those is one line here, and ctrl+o still expands any of them.
 
-    Updated src/app.ts with 47 additions and 12 removals (ctrl+o to expand)
+    Updated src/app.ts with 47 additions and 12 removals (ctrl+o)
     Bash(cd ~/project && npm run build -- --verbose --no-cache…)
-      … +24 lines (ctrl+o to expand)
+      +24 lines (ctrl+o)
 
 WHAT IT CHANGES
 
@@ -29,6 +29,16 @@ folds the rest behind "… +N lines (ctrl+o to expand)". That cap becomes zero,
 so anything longer than a single line is the fold line on its own. Output that
 already fits one line is still printed in full, because the fold has always had
 a rule that it will not hide exactly one line behind a message the same size.
+
+**The rest of the block.** Two things sit under a shell command that do not
+earn their line. The fold line is trimmed to "+24 lines (ctrl+o)", and the
+"Shell cwd was reset to ..." notice, which is the same sentence every time and
+names a directory you are already in, stops getting a row of its own. It is
+still stripped out of the output rather than left in the middle of it, and
+Claude is still told about it, because that part is not the transcript.
+
+So a shell command that used to draw three lines draws two: what ran, and how
+much it said.
 
 Nothing here deletes anything. Every collapsed thing is one ctrl+o away, and
 /focus, which hides tool output completely, is still a different feature.
@@ -172,6 +182,62 @@ def _fold_everything(m):
     ).format(fold=m.group("fold"), gut=m.group("gut"))
 
 
+def _no_cwd_notice(m):
+    """Stop drawing "Shell cwd was reset to ..." as a row of its own.
+
+    Any command that changes directory ends with this notice, and Claude Code
+    gives it a line under the result. It is the same line every time, it names
+    a directory you are already in, and in a session that runs a lot of
+    commands it is a third of everything on screen.
+
+    This is the whole of the function that produces it: it finds the notice,
+    strips it out of the output, and hands it back separately to be drawn.
+    Everything except the handing back is kept, so the notice is still removed
+    from the output rather than left in the middle of it, and the caller that
+    draws the row now gets nothing to draw.
+
+    Claude still sees it. This is the transcript on your screen, not what is
+    sent, so a command that reset the directory is still reported where that
+    matters.
+    """
+    return (
+        "function {fn}({e}){{return{{"
+        'cleanedStderr:{e}.replace({re},"").trim(),cwdResetWarning:null}}}}'
+    ).format(fn=m.group("fn"), e=m.group("e"), re=m.group("re"))
+
+
+def _short_count(m):
+    """"+6 lines" rather than "... +6 lines".
+
+    The ellipsis says the text continues, which reads well under three lines
+    of output that stop mid sentence. With the fold at one line there is
+    nothing above it to continue from, so it is a piece of punctuation
+    floating on its own at the start of the line.
+    """
+    return (
+        'function {fn}({e},{t}="line"){{if({e}<=0)return"";'
+        "return`+${{{e}}} ${{{pl}({e},{t})}}`}}"
+    ).format(fn=m.group("fn"), e=m.group("e"), t=m.group("t"),
+             pl=m.group("pl"))
+
+
+def _short_hint(m):
+    """"(ctrl+o)" rather than "(ctrl+o to expand)".
+
+    Eleven characters of instruction on every folded row. The key is the part
+    worth knowing, and it sits in brackets after a line count, which is enough
+    for anyone to guess what pressing it does.
+
+    The key name is read rather than written, so someone who has rebound the
+    transcript key still sees their own key.
+    """
+    return (
+        'function {fn}(){{let {e}={o1}("app:toggleTranscript","Global",'
+        '"ctrl+o");return {kt}.dim(`(${{{e}}})`)}}'
+    ).format(fn=m.group("fn"), e=m.group("e"), o1=m.group("o1"),
+             kt=m.group("kt"))
+
+
 def _keep_the_short_path(m):
     """Stop a cap of zero from folding output that is already one line.
 
@@ -200,7 +266,7 @@ def _keep_the_short_path(m):
 PATCH = Patch(
     name="claude-quiet",
     summary="one line per tool call instead of a screenful",
-    version="2.1.0",
+    version="2.2.0",
     marker="collapsed:!0/*cq*/",
     migrate=_migrate_from_v1,
     usage="""
@@ -211,8 +277,10 @@ Nothing to learn. Edits, writes, shell commands and tool output are one line:
       … +24 lines (ctrl+o to expand)
 
 ctrl+o still expands any of them. Output that already fits on one line is
-printed in full. /focus hides tool output completely, which is a different
-thing; this keeps everything and only folds it.
+printed in full. The "Shell cwd was reset to ..." notice no longer gets a line
+of its own, and the fold line is trimmed to "+24 lines (ctrl+o)". /focus hides
+tool output completely, which is a different thing; this keeps everything and
+only folds it.
 
     export CLAUDE_QUIET_LINES=3    show three lines of output before folding,
                                    which is what Claude Code ships with
@@ -279,6 +347,41 @@ thing; this keeps everything and only folds it.
                 r"(?P<i>[\w$]+)=(?P<fold>[\w$]+)\*(?P=o)\*4,"
             ),
             _keep_the_short_path,
+            count=1,
+        ),
+        Edit(
+            "never give the cwd notice a line of its own",
+            re.compile(
+                r"function (?P<fn>[\w$]+)\((?P<e>[\w$]+)\)\{"
+                r"let (?P<t>[\w$]+)=(?P=e)\.match\((?P<re>[\w$]+)\);"
+                r"if\(!(?P=t)\)return\{cleanedStderr:(?P=e),"
+                r"cwdResetWarning:null\};"
+                r"let (?P<r>[\w$]+)=(?P=t)\[1\]\?\?null;"
+                r'return\{cleanedStderr:(?P=e)\.replace\((?P=re),""\)\.trim\(\),'
+                r"cwdResetWarning:(?P=r)\}\}"
+            ),
+            _no_cwd_notice,
+            count=1,
+        ),
+        Edit(
+            "drop the ellipsis from the fold line",
+            re.compile(
+                r"function (?P<fn>[\w$]+)\((?P<e>[\w$]+),(?P<t>[\w$]+)="
+                r'"line"\)\{if\((?P=e)<=0\)return"";'
+                r"return`\\u2026 \+\$\{(?P=e)\} "
+                r"\$\{(?P<pl>[\w$]+)\((?P=e),(?P=t)\)\}`\}"
+            ),
+            _short_count,
+            count=1,
+        ),
+        Edit(
+            "shorten the expand hint to the key",
+            re.compile(
+                r"function (?P<fn>[\w$]+)\(\)\{let (?P<e>[\w$]+)="
+                r'(?P<o1>[\w$]+)\("app:toggleTranscript","Global","ctrl\+o"\);'
+                r"return (?P<kt>[\w$]+)\.dim\(`\(\$\{(?P=e)\} to expand\)`\)\}"
+            ),
+            _short_hint,
             count=1,
         ),
     ],

@@ -108,7 +108,7 @@ def stubs(bodies):
     """Stand-ins for the helpers these functions call, named from their own
     source rather than from a release. Every one of these names is minified
     and every one of them changed between 2.1.223 and 2.1.224."""
-    count, wrap, fold, header = bodies
+    count, wrap, fold, header, hint = bodies
     out = []
 
     def pick(pattern, text, what):
@@ -121,11 +121,15 @@ def stubs(bodies):
     plural = pick(r"\$\{([\w$]+)\([\w$]+,[\w$]+\)\}", count, "pluraliser")
     out.append('function %s(n,u){return n===1?u:u+"s"}' % plural)
 
-    # the fold: a dim() wrapper and the "(ctrl+o to expand)" hint
+    # the fold's dim() wrapper. The hint itself is NOT stubbed: its wording is
+    # one of the things being shortened, and a stub would have cheerfully
+    # reported the old wording as a pass. It is lifted in by the caller, with
+    # only its keybinding lookup stood in for.
     out.append("var %s={dim:(s)=>s};"
                % pick(r"([\w$]+)\.dim\(", fold, "dim helper"))
-    out.append('function %s(){return "(ctrl+o to expand)"}'
-               % pick(r"\$\{([\w$]+)\(\)\}", fold, "expand hint"))
+    out.append('function %s(){return "ctrl+o"}'
+               % pick(r'=([\w$]+)\("app:toggleTranscript"', hint,
+                      "keybinding lookup"))
 
     # the wrapper: a display-width function and a slice
     out.append("function %s(s){return s.length}"
@@ -162,16 +166,20 @@ def names(js):
     wrap = re.search(r"function ([\w$]+)\([\w$]+,[\w$]+\)\{"
                      r"let [\w$]+=[\w$]+\.split\(`\n`\),[\w$]+=\[\];", js)
     count = re.search(r'function ([\w$]+)\([\w$]+,[\w$]+="line"\)\{', js)
+    hint = re.search(r'function ([\w$]+)\(\)\{let [\w$]+='
+                     r'[\w$]+\("app:toggleTranscript"', js)
     missing = [n for n, m in (("bash header", header), ("fold", fold),
-                              ("wrap", wrap), ("count", count)) if not m]
+                              ("wrap", wrap), ("count", count),
+                              ("expand hint", hint)) if not m]
     if missing:
         raise SystemExit("could not find: " + ", ".join(missing))
-    return (header.group(1), fold.group(1), wrap.group(1), count.group(1))
+    return (header.group(1), fold.group(1), wrap.group(1), count.group(1),
+            hint.group(1))
 
 
 def run(js, columns, command, output):
-    header, fold, wrap, count = names(js)
-    bodies = [lift(n, js) for n in (count, wrap, fold, header)]
+    header, fold, wrap, count, hint = names(js)
+    bodies = [lift(n, js) for n in (count, wrap, fold, header, hint)]
     # the two module constants the lifted functions read
     consts = re.search(r"var ([\w$]+)=(Math\.max\(0,parseInt\(process\.env\."
                        r"CLAUDE_QUIET_LINES,10\)\|\|0\)|3),([\w$]+)=10;", js)
@@ -241,7 +249,12 @@ def main():
           f"{len(folded)} line(s) for {len(output.splitlines())} of output")
     check(bool(re.search(r"\+24 lines", got["folded"])),
           "and it says how much is behind it")
-    check("expand" in got["folded"], "and how to see it")
+    check("(ctrl+o)" in got["folded"], "and how to see it, in three words",
+          repr(got["folded"]))
+    check("to expand" not in got["folded"],
+          "without spelling out what the key does")
+    check(not got["folded"].startswith("…"),
+          "and without a lone ellipsis in front of it")
 
     short = run(js, args.columns, "ls", "3 files")
     check(short["folded"] == "3 files",
