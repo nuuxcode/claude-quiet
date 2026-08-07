@@ -1,0 +1,81 @@
+name: release
+
+# Cut a release when the patch version changes on main.
+#
+# The version in lib/patch_def.py is the single source of truth: it is what
+# `claude-quiet status` prints and what the installer records, so a release
+# that disagreed with it would be lying. This reads that value, and if there is
+# no tag for it yet, tags the commit and publishes a release.
+#
+# Bumping the version is therefore the whole release process. Nothing else to
+# remember, and no way to push a new version and forget to announce it.
+#
+# It runs on every push to main rather than only when lib/patch_def.py
+# changes, so a version that was pushed before this workflow existed is
+# picked up on the next push instead of never. The tag check below is what
+# keeps that from republishing anything.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Read the version the patch reports
+        id: v
+        run: |
+          version=$(python3 - <<'PY'
+          import re, pathlib
+          src = pathlib.Path("lib/patch_def.py").read_text()
+          m = re.search(r'^\s*version="([^"]+)",', src, re.M)
+          if not m:
+              raise SystemExit("no version= found in lib/patch_def.py")
+          print(m.group(1))
+          PY
+          )
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "read version $version"
+
+      # A pre-release version is still a work in progress and must not publish.
+      - name: Skip anything that is not a plain release version
+        id: shape
+        run: |
+          if [[ "${{ steps.v.outputs.version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "ok=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=no" >> "$GITHUB_OUTPUT"
+            echo "version ${{ steps.v.outputs.version }} is not X.Y.Z, not releasing"
+          fi
+
+      - name: Skip if this version was already released
+        id: tag
+        if: steps.shape.outputs.ok == 'yes'
+        run: |
+          if git rev-parse "v${{ steps.v.outputs.version }}" >/dev/null 2>&1; then
+            echo "new=no" >> "$GITHUB_OUTPUT"
+            echo "v${{ steps.v.outputs.version }} already tagged, nothing to do"
+          else
+            echo "new=yes" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Tag and publish
+        if: steps.shape.outputs.ok == 'yes' && steps.tag.outputs.new == 'yes'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v="v${{ steps.v.outputs.version }}"
+          git tag "$v"
+          git push origin "$v"
+          gh release create "$v" \
+            --title "claude-quiet ${{ steps.v.outputs.version }}" \
+            --generate-notes
+          echo "published $v"
