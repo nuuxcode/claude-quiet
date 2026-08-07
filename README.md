@@ -270,10 +270,8 @@ claude-quiet doctor     check everything this needs
 
 ## Development checks
 
-The test harness is synchronized from the canonical
-[claude-patch-kit](https://github.com/nuuxcode/claude-patch-kit) framework. It
-starts Claude Code in safe mode, gives each run a unique session id, and removes
-only that run's transcript during cleanup.
+The test harness starts Claude Code in safe mode, gives each run a unique
+session id, and removes only that run's transcript during cleanup.
 
 ```bash
 python3 -m pip install -r harness/requirements.txt
