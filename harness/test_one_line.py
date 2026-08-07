@@ -221,9 +221,9 @@ def main():
     print(f"columns  {args.columns}  (roughly a split pane)")
     print()
 
-    command = ("cd /private/tmp/claude-501/-Users-hamzadebbarh/0008a7dc-b569"
-               "-4f99-b802-0b18058c9419/scratchpad && S=shots; playwright-cli"
-               " -s=arkx screenshot --filename=$PWD/$S/01-front-door.png")
+    command = ("cd /tmp/build-artifacts/2026-01-01-nightly/shots && S=shots; "
+               "screenshot-cli --profile=default capture --wait-for=network"
+               " --filename=$PWD/$S/01-front-door.png")
     output = "\n".join(["slides captured", "01-admin-attendance.png",
                         "01-front-door.png"]
                        + [f"0{i}-slide.png" for i in range(2, 23)])
@@ -246,7 +246,7 @@ def main():
           "and it fits the terminal without wrapping",
           f"{len(got['header'])} of {args.columns} columns")
     check(got["header"].endswith("…"), "it says it was shortened")
-    check(got["header"].startswith("cd /private/tmp"),
+    check(got["header"].startswith("cd /tmp/build-artifacts"),
           "the start of the command is still readable")
 
     check(got["folded"] == "", "the output is not drawn at all",
