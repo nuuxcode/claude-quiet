@@ -38,7 +38,7 @@ wrapper script, an IDE integration. There is nothing new to remember.
 
 ---
 
-## New in 2.2.0: the shell command and its output, also one line
+## New in 2.4.0: one line per shell command
 
 Edits were never the only thing filling the screen. A shell command took three
 lines: the command wrapped over four in a split pane, three lines of its
@@ -46,11 +46,30 @@ output, and a notice about the working directory. It takes two.
 
 ```
 ⏺ Bash(cd /tmp && echo one && echo two && echo three && echo four)
-⎿ +4 lines (ctrl+o)
+⏺ Bash(echo solo)
+⎿ solo
 ```
 
-That is a real session, at the two things worth keeping: what ran, and how
-much it said.
+That is a real session. A command whose output does not fit on a line is one
+line: what ran. A command whose output does fit still shows it, because a line
+that says "solo" is worth more than a line that says four lines are hidden.
+
+Everything is still there. **ctrl+o expands any of it**, and Claude reads the
+full output either way; this is your screen, not what was sent.
+
+Raising the cap brings both the output and the count back, so it is one
+setting rather than two:
+
+```bash
+export CLAUDE_QUIET_LINES=1     # ⎿ slides captured
+                                #   +23 lines (ctrl+o)
+export CLAUDE_QUIET_LINES=3     # what Claude Code does on its own
+```
+
+One trade worth knowing: a tool that fails quietly into several lines of
+stdout now shows nothing until you expand it. Failures Claude Code marks as
+errors use a different renderer and are unaffected. `CLAUDE_QUIET_LINES=1` is
+the fix if that is the wrong trade for you.
 
 **The result row starts where the command does.** Its prefix was five columns,
 two spaces before the corner and two after, which pushed a command's output

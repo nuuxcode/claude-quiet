@@ -56,6 +56,11 @@ FIXTURE = "\n".join([
     # the corner that marks a result row, and the space in front of it
     'R.jsxs(T,{"aria-hidden":a,"aria-label":b,dimColor:!0,'
     'children:["  ","\\u23BF \\xA0"]})',
+    # what the fold hands back, and the row that draws it
+    'return[l,u>0?c.dim(count(u)+(r?"":` ${hint()}`)):""]'
+    '.filter(Boolean).join(`\n`)}',
+    'function row(p){let{content:c}=p,ctx=React.useContext(K);'
+    'let text=body,colour=isErr?"error":isWarn?"warning":void 0,el;}',
 ])
 
 
@@ -201,6 +206,33 @@ class BlockShapeTests(unittest.TestCase):
         """Someone who rebound the transcript key sees their own key."""
         self.assertIn('chord("app:toggleTranscript","Global","ctrl+o")',
                       self.out)
+
+
+class SilenceTests(unittest.TestCase):
+    """Mounssif's call: drop the count rather than keep a line for it."""
+
+    def setUp(self):
+        self.out = applied()
+
+    def test_the_fold_hands_back_nothing_when_nothing_is_above_it(self):
+        self.assertIn('if(!l)return"";return[l,', self.out)
+
+    def test_the_count_is_still_built_when_there_is_output_above_it(self):
+        """Raising the cap brings both the output and the count back, so the
+        expression that builds it is carried through rather than deleted."""
+        self.assertIn('u>0?c.dim(count(u)+(r?"":` ${hint()}`)):""', self.out)
+
+    def test_an_empty_result_is_not_given_a_row(self):
+        """Otherwise the corner and its indent are drawn against a blank
+        line, which is the same line count and less information."""
+        self.assertIn("let text=body;if(!text)return null;", self.out)
+
+    def test_the_early_return_comes_after_the_hooks(self):
+        """React's rules do not survive a conditional hook. Everything this
+        component calls runs above the line being edited."""
+        out = self.out
+        self.assertLess(out.index("useContext"),
+                        out.index("if(!text)return null;"))
 
 
 class CapValueTests(unittest.TestCase):

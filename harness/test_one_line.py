@@ -177,7 +177,7 @@ def names(js):
             hint.group(1))
 
 
-def run(js, columns, command, output):
+def run(js, columns, command, output, lines=None):
     header, fold, wrap, count, hint = names(js)
     bodies = [lift(n, js) for n in (count, wrap, fold, header, hint)]
     # the two module constants the lifted functions read
@@ -199,7 +199,12 @@ def run(js, columns, command, output):
     node = shutil.which("node")
     if not node:
         raise SystemExit("node is required")
-    r = subprocess.run([node, "-e", script], capture_output=True, text=True)
+    env = dict(os.environ)
+    env.pop("CLAUDE_QUIET_LINES", None)
+    if lines is not None:
+        env["CLAUDE_QUIET_LINES"] = lines
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True,
+                       env=env)
     if r.returncode != 0:
         raise SystemExit(r.stderr.strip()[:800])
     return json.loads(r.stdout)
@@ -244,16 +249,25 @@ def main():
     check(got["header"].startswith("cd /private/tmp"),
           "the start of the command is still readable")
 
-    folded = got["folded"].splitlines()
-    check(len(folded) == 1, "the output is one line",
-          f"{len(folded)} line(s) for {len(output.splitlines())} of output")
-    check(bool(re.search(r"\+24 lines", got["folded"])),
-          "and it says how much is behind it")
-    check("(ctrl+o)" in got["folded"], "and how to see it, in three words",
-          repr(got["folded"]))
-    check("to expand" not in got["folded"],
+    check(got["folded"] == "", "the output is not drawn at all",
+          f"{len(output.splitlines())} lines in, {got['folded']!r} out")
+
+    # Raising the cap must bring both the output and the count back, which is
+    # what makes this one setting rather than two.
+    with_a_line = run(js, args.columns, command, output, lines="1")
+    kept = with_a_line["folded"].splitlines()
+    check(len(kept) == 2, "one line of output brings the count back",
+          f"{len(kept)} line(s)")
+    check(bool(kept) and kept[0] == "slides captured",
+          "the first line is the output, not a notice",
+          repr(kept[0]) if kept else "")
+    check(len(kept) > 1 and bool(re.search(r"\+23 lines", kept[1])),
+          "and the count is what is left")
+    check(len(kept) > 1 and "(ctrl+o)" in kept[1],
+          "said in three words", repr(kept[1]) if len(kept) > 1 else "")
+    check(len(kept) > 1 and "to expand" not in kept[1],
           "without spelling out what the key does")
-    check(not got["folded"].startswith("…"),
+    check(len(kept) > 1 and not kept[1].startswith("…"),
           "and without a lone ellipsis in front of it")
 
     short = run(js, args.columns, "ls", "3 files")

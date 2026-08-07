@@ -37,10 +37,13 @@ names a directory you are already in, stops getting a row of its own. It is
 still stripped out of the output rather than left in the middle of it, and
 Claude is still told about it, because that part is not the transcript.
 
-So a shell command that used to draw three lines draws two: what ran, and how
-much it said. The second of those also moves three columns left, because the
-corner marking a result row had two spaces in front of it that were pushing
-output further right than the command it belongs to.
+So a shell command that used to draw three lines draws one: what ran. Output
+that fits on a line is still drawn, three columns further left than it was,
+because the corner marking a result row had two spaces in front of it that
+pushed output further right than the command it belongs to. Output that does
+not fit is not summarised either, on the reasoning that twenty commands should
+not cost forty lines to say nothing. Raising CLAUDE_QUIET_LINES brings the
+output and its count back together.
 
 Nothing here deletes anything. Every collapsed thing is one ctrl+o away, and
 /focus, which hides tool output completely, is still a different feature.
@@ -240,6 +243,52 @@ def _short_hint(m):
              kt=m.group("kt"))
 
 
+def _no_fold_line(m):
+    """When nothing is above the fold, draw nothing at all.
+
+    At a cap of zero every multi-line result was one row saying how many lines
+    it was hiding. That is honest, and it is still a row: a session of twenty
+    commands is twenty commands and twenty notices about them. Mounssif chose
+    to drop the notice rather than keep a line for it.
+
+    The rule is the cap, not a new setting. A fold line is only dropped when
+    there is nothing above it to caption, so raising CLAUDE_QUIET_LINES brings
+    both the output and the count straight back: at 1 you get the first line
+    and "+23 lines (ctrl+o)" under it, exactly as before.
+
+    Nothing is lost. ctrl+o still expands the whole thing, and Claude reads
+    the output in full either way, because this is the transcript on your
+    screen and not what was sent.
+
+    The cost, stated plainly: a tool result that is several lines of error
+    text now shows nothing on screen until you expand it. Errors that Claude
+    Code marks as errors go through a different renderer and are unaffected,
+    but a command that fails quietly into stdout is quiet here too. Set
+    CLAUDE_QUIET_LINES=1 if that trade is wrong for you.
+    """
+    return (
+        'if(!{l})return"";'
+        'return[{l},{u}>0?{dim}.dim({cnt}({u})+({r}?"":` ${{{hint}()}}`))'
+        ':""].filter(Boolean).join(`\n`)}}'
+    ).format(l=m.group("l"), u=m.group("u"), dim=m.group("dim"),
+             cnt=m.group("cnt"), r=m.group("r"), hint=m.group("hint"))
+
+
+def _no_empty_row(m):
+    """A row with nothing in it should not be a row.
+
+    Without this the fold above leaves the corner and its indent drawn against
+    an empty line, which is the same line count and less information. The
+    early return sits after every hook this component calls, so the rules
+    about calling hooks unconditionally still hold.
+    """
+    return (
+        "let {t}={z};if(!{t})return null;"
+        'let {g}={err}?"error":{warn}?"warning":void 0,'
+    ).format(t=m.group("t"), z=m.group("z"), g=m.group("g"),
+             err=m.group("err"), warn=m.group("warn"))
+
+
 def _tight_result_indent(m):
     """Pull the result row back to where the command starts.
 
@@ -283,7 +332,7 @@ def _keep_the_short_path(m):
 PATCH = Patch(
     name="claude-quiet",
     summary="one line per tool call instead of a screenful",
-    version="2.3.0",
+    version="2.4.0",
     marker="collapsed:!0/*cq*/",
     migrate=_migrate_from_v1,
     usage="""
@@ -389,6 +438,26 @@ only folds it.
                 r"\$\{(?P<pl>[\w$]+)\((?P=e),(?P=t)\)\}`\}"
             ),
             _short_count,
+            count=1,
+        ),
+        Edit(
+            "no fold line when there is nothing above it",
+            re.compile(
+                r'return\[(?P<l>[\w$]+),(?P<u>[\w$]+)>0\?(?P<dim>[\w$]+)'
+                r'\.dim\((?P<cnt>[\w$]+)\((?P=u)\)\+\((?P<r>[\w$]+)\?"":'
+                r'` \$\{(?P<hint>[\w$]+)\(\)\}`\)\):""\]'
+                r'\.filter\(Boolean\)\.join\(`\n`\)\}'
+            ),
+            _no_fold_line,
+            count=1,
+        ),
+        Edit(
+            "no row for an empty result",
+            re.compile(
+                r'let (?P<t>[\w$]+)=(?P<z>[\w$]+),(?P<g>[\w$]+)='
+                r'(?P<err>[\w$]+)\?"error":(?P<warn>[\w$]+)\?"warning":void 0,'
+            ),
+            _no_empty_row,
             count=1,
         ),
         Edit(
