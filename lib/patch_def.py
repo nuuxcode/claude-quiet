@@ -38,7 +38,9 @@ still stripped out of the output rather than left in the middle of it, and
 Claude is still told about it, because that part is not the transcript.
 
 So a shell command that used to draw three lines draws two: what ran, and how
-much it said.
+much it said. The second of those also moves three columns left, because the
+corner marking a result row had two spaces in front of it that were pushing
+output further right than the command it belongs to.
 
 Nothing here deletes anything. Every collapsed thing is one ctrl+o away, and
 /focus, which hides tool output completely, is still a different feature.
@@ -238,6 +240,21 @@ def _short_hint(m):
              kt=m.group("kt"))
 
 
+def _tight_result_indent(m):
+    """Pull the result row back to where the command starts.
+
+    The prefix is five columns: two spaces, the corner, a space and a
+    non-breaking space. The two leading spaces push the row past the bullet
+    the command is drawn with, so the output of a command starts three columns
+    further right than the command itself, on a line that already lost
+    characters to being narrow.
+
+    Two columns is enough: the corner still marks the row as belonging to the
+    line above, and the text under it now lines up with the text above it.
+    """
+    return '{pre}["\\u23BF "]'.format(pre=m.group("pre"))
+
+
 def _keep_the_short_path(m):
     """Stop a cap of zero from folding output that is already one line.
 
@@ -266,7 +283,7 @@ def _keep_the_short_path(m):
 PATCH = Patch(
     name="claude-quiet",
     summary="one line per tool call instead of a screenful",
-    version="2.2.0",
+    version="2.3.0",
     marker="collapsed:!0/*cq*/",
     migrate=_migrate_from_v1,
     usage="""
@@ -372,6 +389,15 @@ only folds it.
                 r"\$\{(?P<pl>[\w$]+)\((?P=e),(?P=t)\)\}`\}"
             ),
             _short_count,
+            count=1,
+        ),
+        Edit(
+            "pull the result row back three columns",
+            re.compile(
+                r'(?P<pre>"aria-hidden":[\w$]+,"aria-label":[\w$]+,'
+                r'dimColor:!0,children:)\["  ","\\u23BF \\xA0"\]'
+            ),
+            _tight_result_indent,
             count=1,
         ),
         Edit(

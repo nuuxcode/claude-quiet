@@ -46,11 +46,17 @@ output, and a notice about the working directory. It takes two.
 
 ```
 ⏺ Bash(cd /tmp && echo one && echo two && echo three && echo four)
-  ⎿  +4 lines (ctrl+o)
+⎿ +4 lines (ctrl+o)
 ```
 
 That is a real session, at the two things worth keeping: what ran, and how
 much it said.
+
+**The result row starts where the command does.** Its prefix was five columns,
+two spaces before the corner and two after, which pushed a command's output
+three columns to the right of the command itself on a line that had already
+lost characters to being narrow. The corner still says the row belongs to the
+line above; the two spaces in front of it were doing nothing.
 
 **The `Shell cwd was reset to ...` notice no longer gets a line.** It is the
 same sentence every time and it names a directory you are already in. It is

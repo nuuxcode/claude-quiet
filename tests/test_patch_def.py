@@ -53,6 +53,9 @@ FIXTURE = "\n".join([
     'return`\\u2026 +${e} ${plural(e,t)}`}',
     'function hint(){let e=chord("app:toggleTranscript","Global","ctrl+o");'
     'return c.dim(`(${e} to expand)`)}',
+    # the corner that marks a result row, and the space in front of it
+    'R.jsxs(T,{"aria-hidden":a,"aria-label":b,dimColor:!0,'
+    'children:["  ","\\u23BF \\xA0"]})',
 ])
 
 
@@ -183,6 +186,16 @@ class BlockShapeTests(unittest.TestCase):
     def test_the_hint_is_the_key_and_nothing_else(self):
         self.assertIn("return c.dim(`(${e})`)}", self.out)
         self.assertNotIn("to expand", self.out)
+
+    def test_the_result_row_starts_where_the_command_does(self):
+        """Five columns of prefix become two, so output lines up with the
+        command above it instead of sitting three columns to its right."""
+        self.assertIn('children:["\\u23BF "]', self.out)
+        self.assertNotIn('["  ","\\u23BF \\xA0"]', self.out)
+
+    def test_the_corner_itself_is_kept(self):
+        """It is what says the row belongs to the line above."""
+        self.assertIn("\\u23BF", self.out)
 
     def test_the_key_is_read_rather_than_written(self):
         """Someone who rebound the transcript key sees their own key."""
